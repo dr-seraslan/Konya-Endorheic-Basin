@@ -7,7 +7,12 @@ Semi-arid endorheic basins act as climatic hotspots. This project investigates t
 Repository Structure
 data/: Contains sub-basin-based time series datasets (CSV format) for hydrological units including Aksaray, Altınekin, Beyşehir, Cihanbeyli, Ereğli, Karaman, Konya, Melendiz, and Şereflikoçhisar.
 
-scripts/: Contains the R Markdown workflow and scripts (Konya_LST_analyses.R) used for data processing and statistical modeling.
+scripts/:
+
+GEE_LST_Extraction_Workflow.js: Google Earth Engine script used for spatial scaling and data harmonization. It downscales MODIS LST (1 km) via Bilinear Interpolation and Land Cover (500 m) via Nearest Neighbor to a 30 m target resolution to match the SRTM DEM.
+
+
+Konya_LST_analyses.R: R Markdown script for comprehensive statistical modeling, including Mann-Kendall trend tests, Theil-Sen slope estimation, and Linear Mixed-Effects Models (LMM).
 
 Methodology & Tools
 The analysis was performed using the following workflow:
