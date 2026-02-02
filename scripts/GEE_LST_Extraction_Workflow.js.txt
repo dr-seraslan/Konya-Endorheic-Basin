@@ -1,0 +1,142 @@
+/***** STEPS 1–6: DATA PREPARATION (30M TARGET RESOLUTION) *****/
+
+// 1) Define Region of Interest (ROI)
+var studyArea = ee.FeatureCollection('projects/your-project/assets/your-study-area');
+var geom = studyArea.geometry();
+Map.centerObject(studyArea, 9);
+Map.addLayer(studyArea, {color: 'red'}, 'Study Area Boundary', true);
+
+// 2) Load MYD21 LST Collection (2003–2024)
+var MYD21 = ee.ImageCollection('MODIS/061/MYD21A1D')
+  .filterBounds(geom)
+  .filterDate('2003-01-01','2024-12-31');
+
+// 3) LST Pre-processing (Downscaling to 30m via Bilinear Interpolation)
+// As specified in the methodology [cite: 146]
+function prepMYD21(img){
+  var qc = img.select('QC');
+  var modlandOK = qc.bitwiseAnd(3).lt(2);
+  var cloudOK   = qc.rightShift(4).bitwiseAnd(3).eq(0);
+  var accOK     = qc.rightShift(14).bitwiseAnd(3).gte(2);
+  var vza       = img.select('View_Angle');
+  var vzaOK     = vza.abs().lt(45);
+  
+  // Convert to Celsius and apply Bilinear Resampling to 30m
+  var lstC = img.select('LST_1KM').subtract(273.15).rename('LST_C')
+    .resample('bilinear'); // Downscaling step [cite: 146]
+    
+  var mask = modlandOK.and(cloudOK).and(accOK).and(vzaOK);
+  
+  return ee.Image.cat(lstC, vza.rename('VZA')).updateMask(mask)
+    .copyProperties(img, ['system:time_start']);
+}
+var myd21C = MYD21.map(prepMYD21);
+
+// 4) Digital Elevation Model (DEM) - Native 30m Resolution
+// Kept at 30m to preserve topographic granularity 
+var SRTM = ee.Image('USGS/SRTMGL1_003').select('elevation');
+var elevNative = SRTM.clip(geom); 
+
+// 5) Topographic Classification at 30m
+var elevationBands = [
+  {min: 900,  max: 1300, id: 1}, {min: 1300, max: 1700, id: 2},
+  {min: 1700, max: 2100, id: 3}, {min: 2100, max: 2500, id: 4},
+  {min: 2500, max: 2900, id: 5}, {min: 2900, max: 3400, id: 6}
+];
+var elevClass = ee.Image(0).toByte();
+elevationBands.forEach(function(b, i){
+  var cond = (i === elevationBands.length - 1)
+    ? elevNative.gte(b.min).and(elevNative.lte(b.max))
+    : elevNative.gte(b.min).and(elevNative.lt(b.max));
+  elevClass = elevClass.where(cond, b.id);
+});
+elevClass = elevClass.updateMask(elevClass.gt(0));
+
+var terrain = ee.Algorithms.Terrain(elevNative);
+var aspect  = terrain.select('aspect');
+var slope   = terrain.select('slope');
+
+var aspectClass = ee.Image(0).toByte();
+aspectClass = aspectClass.where(slope.lt(2), 5); // Flat
+aspectClass = aspectClass.where(slope.gte(2).and(aspect.gte(315).or(aspect.lt(45))), 1); // North
+aspectClass = aspectClass.where(slope.gte(2).and(aspect.gte(45).and(aspect.lt(135))), 2); // East
+aspectClass = aspectClass.where(slope.gte(2).and(aspect.gte(135).and(aspect.lt(225))), 3); // South
+aspectClass = aspectClass.where(slope.gte(2).and(aspect.gte(225).and(aspect.lt(315))), 4); // West
+aspectClass = aspectClass.updateMask(aspectClass.gt(0));
+
+// 6) Land Cover Processing (Downscaling 500m to 30m via Nearest Neighbor)
+// As specified in the methodology [cite: 148]
+var lcCollection = ee.ImageCollection('MODIS/061/MCD12Q1').select('LC_Type1');
+function processLC(year) {
+  var y = ee.Number(year);
+  var lcImage = ee.Image(ee.Algorithms.If(y.gt(2023),
+    lcCollection.filter(ee.Filter.calendarRange(2023, 2023, 'year')).first(),
+    lcCollection.filter(ee.Filter.calendarRange(y, y, 'year')).first()));
+  
+  // Resample to 30m using Nearest Neighbor to preserve categorical integrity [cite: 148]
+  var lc_30m = lcImage.resample('nearest'); 
+  
+  var lcClass = ee.Image(0).toByte();
+  lcClass = lcClass.where(lc_30m.eq(12).or(lc_30m.eq(14)), 1); // Cropland
+  lcClass = lcClass.where(lc_30m.eq(16), 2); // Barren
+  lcClass = lcClass.where(lc_30m.eq(10), 3); // Grassland
+  lcClass = lcClass.where(lc_30m.eq(6).or(lc_30m.eq(7)).or(lc_30m.eq(8)).or(lc_30m.eq(9)), 4); // Shrubland
+  lcClass = lcClass.where(lc_30m.gte(1).and(lc_30m.lte(5)), 5); // Forest
+  lcClass = lcClass.where(lc_30m.eq(13), 6); // Urban
+  return lcClass.updateMask(lcClass.gt(0)).clip(geom);
+}
+
+/***** STEP 7: MULTI-YEAR ANALYSIS & EXTRACTION AT 30M *****/
+
+// (Label dictionaries and year lists remain identical to maintain your structure)
+var elevLabels = ee.Dictionary({'1':'900-1300m','2':'1300-1700m','3':'1700-2100m','4':'2100-2500m','5':'2500-2900m','6':'2900-3400m'});
+var aspectLabels = ee.Dictionary({'1':'North','2':'East','3':'South','4':'West','5':'Flat'});
+var lcLabels = ee.Dictionary({'1':'Cropland','2':'Barren_Sparse_Vegetation','3':'Grassland','4':'Shrubland_Savanna','5':'Forest','6':'Urban'});
+
+var yearsToProcess = ee.List.sequence(2003, 2024);
+
+var calculateFeaturesForYear = function(runYear) {
+  runYear = ee.Number(runYear);
+  var lcYear = processLC(runYear);
+  var combo = elevClass.multiply(100).add(lcYear.multiply(10)).add(aspectClass).rename('combo');
+  var months = ee.List.sequence(1, 12);
+  
+  var featuresList = months.map(function(m) {
+    var monthlyCollection = myd21C.filter(ee.Filter.calendarRange(runYear, runYear, 'year')).filter(ee.Filter.calendarRange(m, m, 'month'));
+    var monthlyMedianImage = monthlyCollection.select('LST_C').median();
+    var reducer = ee.Reducer.median().combine({reducer2: ee.Reducer.count(), sharedInputs: true});
+    
+    var grouped = ee.Algorithms.If(monthlyCollection.size().gt(0),
+      monthlyMedianImage.addBands(combo).reduceRegion({
+        reducer: reducer.group({groupField: 1, groupName: 'combo_id'}),
+        geometry: geom, 
+        scale: 30, // TARGET RESOLUTION: 30m 
+        maxPixels: 1e13, 
+        tileScale: 16
+      }).get('groups'), ee.List([]));
+      
+    return ee.List(grouped).map(function(d) {
+      d = ee.Dictionary(d);
+      return ee.Algorithms.If(d.contains('median'),
+        ee.Feature(null).set({
+          'combo_id': d.get('combo_id'),
+          'median_LST_C': d.get('median'),
+          'pixel_count': d.get('count'),
+          'year': runYear,
+          'month': m
+        }), null);
+    });
+  });
+  return ee.FeatureCollection(ee.List(featuresList).flatten()).filter(ee.Filter.notNull(['combo_id']));
+};
+
+// ... (Iteration and Labeling steps remain the same) ...
+
+// Export at 30m scale
+Export.table.toDrive({
+  collection: labeledFeatures,
+  description: 'StudyArea_LST_30m_Results',
+  folder: 'LST_Analysis_Output',
+  fileNamePrefix: 'LST_30m_Time_Series',
+  fileFormat: 'CSV'
+});
