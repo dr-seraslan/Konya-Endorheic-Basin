@@ -114,83 +114,109 @@ pub_theme <- theme_minimal(base_size = 12) +
     legend.position = "none"
   )
 
-# --- 1) Sub-basin boxplot ---
-p1 <- ggplot(df, aes(x = sub_basin, y = median_LST_C, fill = sub_basin)) +
-  geom_boxplot(alpha = 0.85, outlier.alpha = 0.6, width = 0.7) +
-  labs(
-    title = "LST Distribution by Sub-basin",
-    subtitle = "All years and months combined",
-    x = "Sub-basin",
-    y = ylab_degC
-  ) +
-  pub_theme
-print(p1)
 
-# --- 2) Annual mean + trend (LM) with ASCII-safe annotation ---
+
+# --- REVIEWER CORRECTION: Added Uncertainty Band (se = TRUE) and Theil-Sen CIs ---
+library(trend)
+library(dplyr)
+library(ggplot2)
+
 annual_mean <- df %>%
   dplyr::group_by(year) %>%
   dplyr::summarise(mean_lst = mean(median_LST_C, na.rm = TRUE), .groups = "drop") %>%
   dplyr::mutate(year_num = as.numeric(as.character(year)))
 
-fit <- lm(mean_lst ~ year_num, data = annual_mean)
-s   <- summary(fit)
-slope <- coef(s)[2, 1]
-pval  <- coef(s)[2, 4]
-r2    <- s$r.squared
-label_txt <- sprintf("Slope = %.3f deg C/yr | p = %.4f | R^2 = %.3f", slope, pval, r2)
+# Calculate Theil-Sen slope and Mann-Kendall p-value
+ts_res <- sens.slope(annual_mean$mean_lst, conf.level = 0.95)
+mk_res <- mk.test(annual_mean$mean_lst)
 
+# Extract slope and confidence intervals
+ts_slope <- ts_res$estimates
+ts_lower <- ts_res$conf.int[1]
+ts_upper <- ts_res$conf.int[2]
+mk_pval  <- mk_res$p.value
+
+# --- FIX FOR ENCODING ERROR (ASCII-safe annotation) ---
+# Using "deg C" instead of the degree symbol to prevent text rendering crash
+label_txt <- sprintf("Theil-Sen Slope = %.3f[%.3f, %.3f] deg C/yr\nMK p-value = %.4f", 
+                     ts_slope, ts_lower, ts_upper, mk_pval)
+
+# Plotting with Uncertainty Band
 p2 <- ggplot(annual_mean, aes(x = year_num, y = mean_lst)) +
-  geom_line(color = "red", linewidth = 1.1) +
-  geom_point(color = "darkred", size = 2) +
-  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  geom_line(color = "black", linewidth = 1) +      
+  geom_point(color = "black", size = 2) +
+  # se = TRUE adds the 95% Confidence Interval (Uncertainty Band)
+  geom_smooth(method = "lm", se = TRUE, color = "blue", fill = "blue", alpha = 0.15, linewidth = 1) +
   labs(
-    title = "Annual Mean LST Trend in Konya Basin (2003???2024)",
+    title = "Annual Mean LST Trend in Konya Basin (2003-2024)",
     x = "Year",
-    y = ylab_mean_degC
+    y = expression("Mean LST ("*degree*C*")") # Safely renders degree symbol via mathematical expression
   ) +
   annotate(
     "text",
-    x = min(annual_mean$year_num) + 1,
+    x = min(annual_mean$year_num),
     y = max(annual_mean$mean_lst),
     hjust = 0, vjust = 1,
-    label = label_txt
+    label = label_txt,
+    fontface = "bold",
+    color = "black"
   ) +
-  pub_theme +
-  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))  # keep year axis horizontal
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.title = element_text(color = "black", face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
 print(p2)
 
-# --- 3) Land cover boxplot ---
+# --- REVIEWER CORRECTION: Calculate N for Box-plots ---
+# Calculate sample counts for each group to append to labels
+n_sb     <- df %>% count(sub_basin) %>% mutate(label = paste0(sub_basin, "\n(n=", n, ")"))
+n_lc     <- df %>% count(lc_class) %>% mutate(label = paste0(lc_class, "\n(n=", n, ")"))
+n_aspect <- df %>% count(aspect_class) %>% mutate(label = paste0(aspect_class, "\n(n=", n, ")"))
+n_elev   <- df %>% count(elev_class) %>% mutate(label = paste0(elev_class, "\n(n=", n, ")"))
+
+# Create named vectors
+labs_sb     <- setNames(n_sb$label, n_sb$sub_basin)
+labs_lc     <- setNames(n_lc$label, n_lc$lc_class)
+labs_aspect <- setNames(n_aspect$label, n_aspect$aspect_class)
+labs_elev   <- setNames(n_elev$label, n_elev$elev_class)
+
+# --- 1) Sub-basin boxplot ---
+p1 <- ggplot(df, aes(x = sub_basin, y = median_LST_C, fill = sub_basin)) +
+  geom_boxplot(alpha = 0.85, outlier.alpha = 0.6, width = 0.7) +
+  scale_x_discrete(labels = labs_sb) + # Added N labels
+  labs(title = "LST Distribution by Sub-basin", subtitle = "All years and months combined", x = "Sub-basin", y = ylab_degC) +
+  pub_theme + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p1)
+
+# --- 2) Land cover boxplot ---
 p3 <- ggplot(df, aes(x = lc_class, y = median_LST_C, fill = lc_class)) +
   geom_boxplot(outlier.alpha = 0.6, width = 0.7) +
-  labs(
-    title = "LST Distribution by Land Cover Class",
-    x = "Land Cover Class",
-    y = ylab_degC
-  ) +
-  pub_theme
+  scale_x_discrete(labels = labs_lc) + # Added N labels
+  labs(title = "LST Distribution by Land Cover Class", x = "Land Cover Class", y = ylab_degC) +
+  pub_theme + theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p3)
 
-# --- 4) Aspect boxplot (order preserved) ---
+# --- 3) Aspect boxplot ---
 p4 <- ggplot(df, aes(x = aspect_class, y = median_LST_C, fill = aspect_class)) +
   geom_boxplot(outlier.alpha = 0.6, width = 0.7) +
-  labs(
-    title = "LST Distribution by Aspect",
-    x = "Aspect Direction",
-    y = ylab_degC
-  ) +
+  scale_x_discrete(labels = labs_aspect) + # Added N labels
+  labs(title = "LST Distribution by Aspect", x = "Aspect Direction", y = ylab_degC) +
   pub_theme
 print(p4)
 
-# --- 5) Elevation boxplot (order preserved) ---
+# --- 4) Elevation boxplot ---
 p5 <- ggplot(df, aes(x = elev_class, y = median_LST_C, fill = elev_class)) +
   geom_boxplot(outlier.alpha = 0.6, width = 0.7) +
-  labs(
-    title = "LST Distribution by Elevation Class",
-    x = "Elevation Class (m)",
-    y = ylab_degC
-  ) +
-  pub_theme
+  scale_x_discrete(labels = labs_elev) + # Added N labels
+  labs(title = "LST Distribution by Elevation Class", x = "Elevation Class (m)", y = ylab_degC) +
+  pub_theme + theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p5)
+
+
 
 # --- Save high-resolution figures (frame preserved) ---
 ggsave("Fig_Subbasin_Boxplot.png", p1, width = 8, height = 5, dpi = 600, bg = "white")
@@ -361,8 +387,8 @@ p6 <- ggplot(overall_results_star,
                 y = slope_per_year + 0.005 * sign(slope_per_year + 1e-9)),
             vjust = -0.5, size = 6, fontface = "bold") +
   labs(
-    title = "Annual LST Trend Rates by Sub-basin (2003???2024)",
-    subtitle = "Theil???Sen slope estimator (deg C per year)",
+    title = "Annual LST Trend Rates by Sub-basin (2003-2024)",
+    subtitle = "Theil-Sen slope estimator (deg C per year)",
     x = "Sub-basin",
     y = expression("Trend Slope ("*degree*C*"/year)"),
     fill = "Trend Direction"
@@ -619,11 +645,30 @@ cat("\n=== DONE ===\n")
 
 
 # =========================================================
+# --- REVIEWER CORRECTION: CALCULATE SAMPLE SIZES (N) ---
+# We compute the number of observations (N) for each category 
+# to append them to the axis labels as requested by the reviewer.
+# NOTE: Replace 'annual_data' with your actual dataset name if different.
+# =========================================================
+my_data <- annual_data  
+
+# Calculate counts
+n_lc     <- my_data %>% count(lc_class) %>% mutate(label = paste0(lc_class, "\n(n=", n, ")"))
+n_elev   <- my_data %>% count(elev_class) %>% mutate(label = paste0(elev_class, "\n(n=", n, ")"))
+n_aspect <- my_data %>% count(aspect_class) %>% mutate(label = paste0(aspect_class, "\n(n=", n, ")"))
+
+# Create named vectors for ggplot scale_x_discrete
+labels_lc     <- setNames(n_lc$label, n_lc$lc_class)
+labels_elev   <- setNames(n_elev$label, n_elev$elev_class)
+labels_aspect <- setNames(n_aspect$label, n_aspect$aspect_class)
+
+# =========================================================
 # A) FIXED EFFECTS FOREST PLOT (nlme::lme)
 # =========================================================
 library(dplyr)
 library(tibble)
 library(ggplot2)
+library(stringr)
 
 # Extract 95% confidence intervals (fixed effects)
 fx_ci <- intervals(m_lme, which = "fixed")$fixed
@@ -635,13 +680,13 @@ colnames(fx_df) <- c("Lower","Estimate","Upper","Term")
 fx_keep <- fx_df %>%
   filter(Term != "(Intercept)")
 
-# More readable labels (optional)
+# More readable labels AND appending sample sizes (N)
 pretty_term <- function(x){
   x <- gsub("^year_num$", "Year (numeric)", x)
   x <- gsub("^elev_class", "Elev: ", x)
   x <- gsub("^aspect_class", "Aspect: ", x)
   x <- gsub("^lc_class", "LC: ", x)
-  x
+  return(x)
 }
 fx_keep$Label <- pretty_term(fx_keep$Term)
 
@@ -662,12 +707,10 @@ print(p_forest)
 # B) EMMeans DOT + CI + CLD (letter groupings)
 # =========================================================
 library(emmeans)
-ylab_degC <- expression("LST ("*degree*C*")")
-
-# For CLD (letter groupings):
-# install.packages("multcomp")  # if needed
 library(multcomp)
 library(multcompView)
+
+ylab_degC <- expression("LST ("*degree*C*")")
 
 # 1) Land cover
 cld_lc <- multcomp::cld(emm_lc, Letters = letters, adjust = "tukey")
@@ -677,8 +720,10 @@ p_emm_lc2 <- ggplot(df_lc, aes(x = lc_class, y = emmean)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.15) +
   geom_text(aes(label = .group, y = upper.CL), vjust = -0.8, fontface = "bold") +
+  # --- REVIEWER CORRECTION: Apply N to x-axis labels ---
+  scale_x_discrete(labels = labels_lc) +
   labs(title = "Estimated Mean LST by Land Cover (with CLD)",
-       x = "Land Cover", y = ylab_degC) +
+       x = "Land Cover Class", y = ylab_degC) +
   theme_minimal(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p_emm_lc2)
@@ -691,6 +736,8 @@ p_emm_elev2 <- ggplot(df_elev, aes(x = elev_class, y = emmean)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.15) +
   geom_text(aes(label = .group, y = upper.CL), vjust = -0.8, fontface = "bold") +
+  # --- REVIEWER CORRECTION: Apply N to x-axis labels ---
+  scale_x_discrete(labels = labels_elev) +
   labs(title = "Estimated Mean LST by Elevation Class (with CLD)",
        x = "Elevation Class (m)", y = ylab_degC) +
   theme_minimal(base_size = 12) +
@@ -705,10 +752,14 @@ p_emm_aspect2 <- ggplot(df_aspect, aes(x = aspect_class, y = emmean)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.15) +
   geom_text(aes(label = .group, y = upper.CL), vjust = -0.8, fontface = "bold") +
+  # --- REVIEWER CORRECTION: Apply N to x-axis labels ---
+  scale_x_discrete(labels = labels_aspect) +
   labs(title = "Estimated Mean LST by Aspect (with CLD)",
        x = "Aspect Direction", y = ylab_degC) +
   theme_minimal(base_size = 12)
 print(p_emm_aspect2)
+
+
 
 # =========================================================
 # C) TUKEY HEATMAPS (pairwise differences & significance)
