@@ -1,4 +1,4 @@
-# Scale-Dependent Spatial Masking of Land Surface Temperature Trends in the Semi-Arid Konya Endorheic Basin, Türkiye
+# Spatiotemporal Assessment of Thermal Anomalies Under Global Warming (2003-2024): A Multi-Scale Analysis of the Semi-Arid Konya Endorheic Basin, Türkiye
 
 This repository contains the datasets, Google Earth Engine scripts, and R analysis codes used for the study:
 
